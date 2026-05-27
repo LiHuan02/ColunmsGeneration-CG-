@@ -13,12 +13,13 @@ class VCSPColumn:
 
     def __init__(self, duty_type, cost, node_sequence, arc_sequence,
                  d_trips=None, f_trips=None, g_trips=None, q_times=None,
-                 reduced_cost=None):
+                 reduced_cost=None, duty_length=None):
         self.duty_type = duty_type  # 'I' or 'II'
         self.cost = cost  # actual operational cost
         self.reduced_cost = reduced_cost if reduced_cost is not None else cost
         self.node_sequence = list(node_sequence)
         self.arc_sequence = list(arc_sequence)  # list of (from, to, arc_type)
+        self.duty_length = duty_length if duty_length is not None else 0.0  # total work time
 
         # Binary parameter maps
         self.d_trips = d_trips if d_trips is not None else {}  # d_trip_id -> bool

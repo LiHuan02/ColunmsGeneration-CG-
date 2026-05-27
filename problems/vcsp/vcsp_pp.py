@@ -61,6 +61,7 @@ class Label:
             g_trips=self.g_trips,
             q_times=self.q_times,
             reduced_cost=self.reduced_cost,
+            duty_length=self.duty_length,
         )
 
     def __repr__(self):
