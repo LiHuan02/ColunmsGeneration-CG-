@@ -2,3 +2,4 @@
 /.venv
 /requirement.txt
 /__pycache__
+/data_generation/training_data/

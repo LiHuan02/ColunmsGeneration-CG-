@@ -13,7 +13,7 @@ def main():
     parser.add_argument('--relief', type=int, default=2, help='Relief points per trip')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
     parser.add_argument('--selection', type=str, default='no_selection',
-                        choices=['no_selection', 'milp'],
+                        choices=['no_selection', 'milp', 'gnn'],
                         help='Column selection strategy')
     parser.add_argument('--max-iter', type=int, default=200, help='Max CG iterations')
     parser.add_argument('--bus-cost', type=float, default=50000, help='Bus fixed cost')

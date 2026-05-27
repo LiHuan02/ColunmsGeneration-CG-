@@ -5,6 +5,7 @@ from problems.vcsp.vcsp_pp import VCSPPricingProblem
 from problems.vcsp.driver_network import DriverNetwork
 from selection.no_selection import NoSelectionCG
 from selection.milp_selection import MILPSelectionCG
+from selection.gnn_selection import GNNSelectionCG
 
 
 class VCSPSolver:
@@ -147,6 +148,8 @@ class VCSPSolver:
             selector = NoSelectionCG(self.rmp, None, self.config)
         elif selection_strategy == 'milp':
             selector = MILPSelectionCG(self.rmp, None, self.config)
+        elif selection_strategy == 'gnn':
+            selector = GNNSelectionCG(self.rmp, None, self.config)
         else:
             raise ValueError(f"Unknown selection strategy: {selection_strategy}")
 

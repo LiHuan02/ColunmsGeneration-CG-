@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""VCSP Experiments: Compare NO-S vs MILP-S."""
+"""VCSP Experiments: Compare NO-S vs MILP-S vs GNN-S.
+
+Based on EBSCO paper Table 5.
+Uses the original (non-inflated) initial column strategy for fair comparison.
+"""
 
 import time
 import numpy as np
@@ -7,7 +11,7 @@ from core.column_generation import VCSPSolver
 from problems.vcsp.instance import VCSPInstance
 
 
-def run_instance(num_trips, seed, selection, config=None):
+def run_instance(num_trips, seed, selection, config=None, gnn_config=None):
     """Run a single CG instance with a given selection strategy."""
     instance = VCSPInstance(num_trips=num_trips, seed=seed)
     solver = VCSPSolver(instance, config)
@@ -36,14 +40,19 @@ def run_instance(num_trips, seed, selection, config=None):
     }
 
 
-def run_comparison_experiment(trip_sizes=(20, 30, 50), num_instances=3):
+def run_comparison_experiment(trip_sizes=(20, 30, 50), num_instances=3,
+                               strategies=('no_selection', 'milp', 'gnn'),
+                               gnn_model_path='gnn/models/best_model.pt'):
     """Run comparison experiments across multiple instance sizes."""
+    # Base config shared by all strategies (matching Table 4)
     config = {
         'n_min_cols': 100,
         'n_max_cols': 5000,
         'n_max_blks': 10,
         'epsilon': 0.1,
         'additional_pct': 0.5,
+        'model_path': gnn_model_path,
+        'min_select': 5,  # Lower for small instances (paper uses 100 for 400-trip)
     }
 
     results = []
@@ -52,32 +61,32 @@ def run_comparison_experiment(trip_sizes=(20, 30, 50), num_instances=3):
             seed = 100 * num_trips + i
             print(f"\n--- Instance: {num_trips} trips, seed={seed} ---")
 
-            # NO-S
-            print("\n[NO-S]")
-            res_no = run_instance(num_trips, seed, 'no_selection', config)
-            results.append(res_no)
+            for strat in strategies:
+                print(f"\n[{strat.upper()}]")
+                res = run_instance(num_trips, seed, strat, config)
+                results.append(res)
 
-            # MILP-S
-            print("\n[MILP-S]")
-            res_milp = run_instance(num_trips, seed, 'milp', config)
-            results.append(res_milp)
-
-            # Print comparison
-            print(f"\n  Comparison (NO-S vs MILP-S):")
-            print(f"    Time: {res_no['total_time']:.1f}s vs {res_milp['total_time']:.1f}s "
-                  f"({(res_no['total_time'] - res_milp['total_time']) / res_no['total_time'] * 100:.0f}% reduction)")
-            print(f"    Iterations: {res_no['iterations']} vs {res_milp['iterations']}")
-            print(f"    Final columns: {res_no['final_columns']} vs {res_milp['final_columns']}")
-            print(f"    Total cols generated: {res_no['columns_generated']} vs {res_milp['columns_generated']}")
+            # Print quick comparison for this instance
+            print(f"\n  Comparison:")
+            parts = []
+            for strat in strategies:
+                strat_results = [r for r in results if r['num_trips'] == num_trips
+                                 and r['seed'] == seed and r['selection'] == strat]
+                if strat_results:
+                    r = strat_results[-1]
+                    parts.append(f"{strat}: {r['total_time']:.1f}s, {r['iterations']} iters, "
+                                 f"{r['final_columns']} cols")
+            for p in parts:
+                print(f"    {p}")
 
     return results
 
 
 def print_summary_table(results):
-    """Print results formatted as a table matching the paper's format."""
-    print("\n" + "=" * 100)
+    """Print results formatted as a table matching the paper's Table 5 format."""
+    print("\n" + "=" * 110)
     print("SUMMARY TABLE")
-    print("=" * 100)
+    print("=" * 110)
 
     # Group by trip size and selection
     grouped = {}
@@ -87,9 +96,10 @@ def print_summary_table(results):
             grouped[key] = []
         grouped[key].append(r)
 
-    header = f"{'Trips':>6} {'Strategy':>12} {'Time':>8} {'RMP':>8} {'PP':>8} {'Iters':>6} {'Cols':>8} {'Obj':>10} {'Buses':>6}"
+    header = (f"{'Trips':>6} {'Strategy':>14} {'Total':>8} {'RMP':>8} {'PP':>8} "
+              f"{'Iters':>6} {'Cols':>8} {'Obj':>10} {'Buses':>6}")
     print(header)
-    print("-" * 100)
+    print("-" * 110)
 
     for (num_trips, sel) in sorted(grouped.keys()):
         runs = grouped[(num_trips, sel)]
@@ -101,28 +111,32 @@ def print_summary_table(results):
         avg_obj = np.mean([r['objective'] for r in runs])
         avg_buses = np.mean([r['buses'] for r in runs])
 
-        line = f"{num_trips:>6} {sel:>12} {avg_time:>8.1f} {avg_rmp:>8.1f} {avg_pp:>8.1f} {avg_iters:>6.0f} {avg_cols:>8.0f} {avg_obj:>10.2f} {avg_buses:>6.1f}"
+        line = (f"{num_trips:>6} {sel:>14} {avg_time:>8.1f} {avg_rmp:>8.1f} {avg_pp:>8.1f} "
+                f"{avg_iters:>6.0f} {avg_cols:>8.0f} {avg_obj:>10.2f} {avg_buses:>6.1f}")
         print(line)
 
-    # Also compute average reduction
+    # Compute average reduction relative to NO-S
+    print("\n" + "-" * 110)
+    print("AVERAGE TIME REDUCTION (vs NO-S)")
     no_data = {}
-    milp_data = {}
+    other_data = {}
     for r in results:
         if r['selection'] == 'no_selection':
             no_data[r['num_trips']] = no_data.get(r['num_trips'], []) + [r]
         else:
-            milp_data[r['num_trips']] = milp_data.get(r['num_trips'], []) + [r]
+            key = (r['num_trips'], r['selection'])
+            other_data[key] = other_data.get(key, []) + [r]
 
-    print("\n" + "-" * 100)
-    print("AVERAGE TIME REDUCTION")
     for n in sorted(no_data.keys()):
         no_avg = np.mean([r['total_time'] for r in no_data[n]])
-        milp_avg = np.mean([r['total_time'] for r in milp_data.get(n, [])])
-        if no_avg > 0:
-            reduction = (no_avg - milp_avg) / no_avg * 100
-        else:
-            reduction = 0
-        print(f"  {n} trips: {reduction:.1f}% time reduction")
+        print(f"  {n} trips:")
+        for strat in sorted(set(k[1] for k in other_data if k[0] == n)):
+            other_avg = np.mean([r['total_time'] for r in other_data.get((n, strat), [])])
+            if no_avg > 0:
+                reduction = (no_avg - other_avg) / no_avg * 100
+            else:
+                reduction = 0
+            print(f"    {strat:>14s}: {reduction:+.1f}%")
 
 
 if __name__ == '__main__':
@@ -130,7 +144,7 @@ if __name__ == '__main__':
     num_instances = 2
 
     print("=" * 60)
-    print("VCSP EXPERIMENTS: NO-S vs MILP-S")
+    print("VCSP EXPERIMENTS: NO-S vs MILP-S vs GNN-S")
     print(f"Trip sizes: {trip_sizes}, Instances per size: {num_instances}")
     print("=" * 60)
 
