@@ -1,3 +1,5 @@
-numpy==1.21.0
-scipy==1.7.0
-matplotlib==3.4.2
+ortools>=9.11
+scipy>=1.13
+numpy>=1.26
+pandas>=2.0
+matplotlib>=3.8

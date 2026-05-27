@@ -1,70 +1,129 @@
 import numpy as np
-from ...core.column_generation import ColumnGeneration
+from ortools.linear_solver import pywraplp
 
 
-class MILPSelectionCG(ColumnGeneration):
-    """基于MILP的列选择算法（MILP-S）"""
+class MILPSelectionCG:
+    """MILP-S: Column selection by solving a MILP.
 
-    def __init__(self, rmp, pp, max_iterations=100, tolerance=1e-6, epsilon=0.1):
-        super().__init__(rmp, pp, max_iterations, tolerance)
-        self.epsilon = epsilon  # MILP选择中的惩罚项
+    Per iteration, solves:
+    Min  sum(c_p * theta_p) + c*B + sum(epsilon * y_p)
+    s.t.
+      All current RMP constraints (with B variable)
+      theta_p <= y_p, for all p in generated columns
+      theta_p >= 0, B >= 0, y_p in {0, 1}
 
-    def select_columns(self, new_columns, dual_values):
-        """
-        使用MILP选择最有希望的列
+    Then adds: selected columns (y_p=1) + 50% of remaining negative reduced cost columns.
+    """
 
-        参数:
-            new_columns: 生成的新列列表
-            dual_values: 当前RMP的对偶值
+    def __init__(self, rmp, pp, config=None):
+        self.rmp = rmp
+        self.pp = pp
+        self.config = config or {}
+        self.epsilon = self.config.get('epsilon', 0.1)
+        self.additional_pct = self.config.get('additional_pct', 0.5)
+        self.min_select = self.config.get('min_select', 1)
 
-        返回:
-            selected_columns: 选中的列列表
-        """
-        num_new = len(new_columns)
-        if num_new == 0:
+    def select(self, columns):
+        """Select columns using MILP."""
+        if not columns:
             return []
 
-        # 暂时简化实现：只选择缩减成本最小的几列
-        # 在完整实现中，这将替换为论文中的MILP选择模型
-        columns_with_rc = []
-        for col in new_columns:
-            rc = col.cost - np.dot(dual_values, col.constraints)
-            columns_with_rc.append((col, rc))
+        num_existing = len(self.rmp.columns)
+        num_new = len(columns)
+        num_total = num_existing + num_new
 
-        # 按缩减成本排序
-        columns_with_rc.sort(key=lambda x: x[1])
+        inst = self.rmp.instance
+        num_d_trips = inst.num_d_trips
+        num_trips = inst.num_trips
+        num_departure = len(inst.departure_times)
+        num_eq = num_d_trips + 2 * num_trips
+        num_ub = num_departure
 
-        # 选择前30%的列，但至少选择1列
-        num_to_select = max(1, int(0.3 * num_new))
-        selected_columns = [col for col, _ in columns_with_rc[:num_to_select]]
+        solver = pywraplp.Solver.CreateSolver('CBC')
+        if not solver:
+            solver = pywraplp.Solver.CreateSolver('SCIP')
+        if not solver:
+            print("  MILP-S: No MILP solver, falling back to NO-S")
+            return columns
 
-        return selected_columns
+        # Variables: theta_p for all columns, B, y_p for new columns only
+        theta_vars = [solver.NumVar(0.0, solver.infinity(), f'theta_{i}') for i in range(num_total)]
+        B_var = solver.NumVar(0.0, solver.infinity(), 'B')
+        y_vars = [solver.IntVar(0, 1, f'y_{i}') for i in range(num_new)]
 
-    def solve(self):
-        """执行MILP选择的列生成算法"""
-        iteration = 0
-        while iteration < self.max_iterations:
-            # 1. 求解RMP
-            try:
-                primal_solution, objective = self.rmp.solve()
-                dual_values = self.rmp.get_dual_values()
-            except Exception as e:
-                print(f"Error solving RMP at iteration {iteration}: {e}")
-                break
+        # Objective
+        objective = solver.Objective()
+        for i, col in enumerate(self.rmp.columns + columns):
+            objective.SetCoefficient(theta_vars[i], col.cost)
+        objective.SetCoefficient(B_var, inst.bus_fixed_cost)
+        for i in range(num_new):
+            objective.SetCoefficient(y_vars[i], self.epsilon)
+        objective.SetMinimization()
 
-            # 2. 求解PP
-            new_columns = self.pp.solve(dual_values)
+        # Build coefficient vectors
+        col_vectors = []
+        for col in self.rmp.columns + columns:
+            vec = np.zeros(num_eq + num_ub)
+            for d_id in col.d_trips:
+                vec[d_id] = 1.0
+            for w_id in col.f_trips:
+                vec[num_d_trips + w_id] = 1.0
+            for w_id in col.g_trips:
+                vec[num_d_trips + num_trips + w_id] = 1.0
+            for h_idx, h in enumerate(inst.departure_times):
+                if col.q_times.get(h, False):
+                    vec[num_eq + h_idx] = 1.0
+            col_vectors.append(vec)
 
-            # 3. 检查是否找到负缩减成本的列
-            if not new_columns:
-                print(f"Optimal solution found after {iteration} iterations")
-                break
+        # 1. Equality constraints (d-trip, bus arrival, bus departure)
+        for c_idx in range(num_eq):
+            ct = solver.Constraint(1.0, 1.0)
+            for i in range(num_total):
+                if col_vectors[i][c_idx] != 0:
+                    ct.SetCoefficient(theta_vars[i], col_vectors[i][c_idx])
 
-            # 4. 使用MILP选择列
-            selected_columns = self.select_columns(new_columns, dual_values)
+        # 2. Bus count constraints: sum(q) - B <= 0
+        for h_idx in range(num_ub):
+            c_idx = num_eq + h_idx
+            ct = solver.Constraint(-solver.infinity(), 0.0)
+            for i in range(num_total):
+                if col_vectors[i][c_idx] != 0:
+                    ct.SetCoefficient(theta_vars[i], col_vectors[i][c_idx])
+            ct.SetCoefficient(B_var, -1.0)
 
-            # 5. 添加选中的列到RMP
-            self.rmp.add_columns(selected_columns)
-            iteration += 1
+        # 3. Linking: theta_p <= y_p for new columns
+        for i in range(num_new):
+            idx = num_existing + i
+            ct = solver.Constraint(-solver.infinity(), 0.0)
+            ct.SetCoefficient(theta_vars[idx], 1.0)
+            ct.SetCoefficient(y_vars[i], -1.0)
 
-        return self.rmp.get_current_columns(), self.rmp.current_solution
+        # Solve
+        status = solver.Solve()
+        if status not in [pywraplp.Solver.OPTIMAL, pywraplp.Solver.FEASIBLE]:
+            print(f"  MILP-S: Solve status {status}, falling back to all columns")
+            return columns
+
+        # Get selected columns (y_p = 1)
+        selected_indices = []
+        for i in range(num_new):
+            if y_vars[i].solution_value() > 0.5:
+                selected_indices.append(i)
+
+        selected_cols = [columns[i] for i in selected_indices]
+
+        # Add 50% of remaining negative reduced cost columns
+        unselected = [(i, columns[i]) for i in range(num_new) if i not in selected_indices]
+        unselected.sort(key=lambda x: x[1].reduced_cost)
+        n_additional = int(len(unselected) * self.additional_pct)
+        additional = [col for _, col in unselected[:n_additional]]
+
+        result = selected_cols + additional
+
+        # Ensure at least min_select columns
+        if len(result) < self.min_select:
+            result = columns[:self.min_select]
+
+        print(f"  MILP-S: {len(selected_cols)} selected + {len(additional)} additional = {len(result)} total")
+
+        return result

@@ -1,61 +1,76 @@
-import numpy as np
-from problems.scp.scp_model import generate_random_scp_instance
-from problems.scp.scp_rmp import SCPRMP
-from problems.scp.scp_pp import SCPPricingProblem
-from selection.no_selection import NoSelectionCG
-from selection.milp_selection import MILPSelectionCG
+#!/usr/bin/env python3
+"""VCSP Column Generation - Main Entry Point."""
 
-
-def run_simple_example():
-    """运行一个简单的SCP示例"""
-    print("=== 运行简单SCP示例 ===")
-
-    # 生成一个小的SCP实例
-    instance = generate_random_scp_instance(num_elements=5, num_sets=10, density=0.4)
-    print(f"生成SCP实例: {instance.num_elements}元素, {len(instance.sets)}集合")
-
-    # 打印实例
-    for i, (s, c) in enumerate(zip(instance.sets, instance.costs)):
-        elements = [j for j, val in enumerate(s) if val]
-        print(f"集合 {i}: 元素 {elements}, 成本 {c}")
-
-    # 创建RMP和PP
-    rmp = SCPRMP(instance)
-    pp = SCPPricingProblem(instance)
-
-    # 运行NO-S
-    print("\n运行NO-S (无列选择)...")
-    no_selection = NoSelectionCG(rmp, pp)
-    no_cols, no_solution = no_selection.solve()
-
-    # 打印结果
-    print("\nNO-S结果:")
-    for col, val in zip(no_cols, no_solution):
-        if val > 0:
-            print(f"集合 {col.set_index} 选择: {val:.4f}")
-    print(f"目标值: {sum(col.cost * val for col, val in zip(no_cols, no_solution) if val > 0):.4f}")
-    print(f"迭代次数: {len(no_selection.iteration_logs)}")
-
-    # 重新初始化RMP和PP
-    rmp = SCPRMP(instance)
-    pp = SCPPricingProblem(instance)
-
-    # 运行MILP-S
-    print("\n运行MILP-S (MILP选择)...")
-    milp_selection = MILPSelectionCG(rmp, pp)
-    milp_cols, milp_solution = milp_selection.solve()
-
-    # 打印结果
-    print("\nMILP-S结果:")
-    for col, val in zip(milp_cols, milp_solution):
-        if val > 0:
-            print(f"集合 {col.set_index} 选择: {val:.4f}")
-    print(f"目标值: {sum(col.cost * val for col, val in zip(milp_cols, milp_solution) if val > 0):.4f}")
-    print(f"迭代次数: {len(milp_selection.iteration_logs)}")
+import argparse
+import time
+from problems.vcsp.instance import VCSPInstance
+from core.column_generation import VCSPSolver
 
 
 def main():
-    run_simple_example()
+    parser = argparse.ArgumentParser(description='VCSP Column Generation')
+    parser.add_argument('--trips', type=int, default=30, help='Number of trips')
+    parser.add_argument('--relief', type=int, default=2, help='Relief points per trip')
+    parser.add_argument('--seed', type=int, default=42, help='Random seed')
+    parser.add_argument('--selection', type=str, default='no_selection',
+                        choices=['no_selection', 'milp'],
+                        help='Column selection strategy')
+    parser.add_argument('--max-iter', type=int, default=200, help='Max CG iterations')
+    parser.add_argument('--bus-cost', type=float, default=50000, help='Bus fixed cost')
+    parser.add_argument('--driver-cost', type=float, default=50000, help='Driver fixed cost')
+    parser.add_argument('--cost-per-min', type=float, default=1.0, help='Cost per minute')
 
-if __name__ == "__main__":
+    args = parser.parse_args()
+
+    # Create instance
+    print("Creating VCSP instance...")
+    instance = VCSPInstance(
+        num_trips=args.trips,
+        num_relief_points_per_trip=args.relief,
+        seed=args.seed,
+        bus_fixed_cost=args.bus_cost,
+        driver_fixed_cost=args.driver_cost,
+        cost_per_minute=args.cost_per_min,
+    )
+
+    print(f"Instance: {instance.num_trips} trips, {instance.num_d_trips} d-trips")
+    print(f"Departure times: {instance.get_num_departure_times()}")
+
+    # Configure
+    config = {
+        'n_min_cols': 100,
+        'n_max_cols': 5000,
+        'n_max_blks': 10,
+        'epsilon': 0.1,
+        'additional_pct': 0.5,
+    }
+
+    # Create solver
+    solver = VCSPSolver(instance, config)
+
+    # Solve
+    start = time.time()
+    columns, col_sol, bus_sol, obj = solver.solve(
+        selection_strategy=args.selection,
+        max_iterations=args.max_iter,
+    )
+    elapsed = time.time() - start
+
+    print(f"\n{'=' * 60}")
+    print("RESULT")
+    print(f"{'=' * 60}")
+    print(f"Selection strategy: {args.selection}")
+    print(f"Trips: {args.trips}")
+    print(f"Total time: {elapsed:.2f}s")
+    print(f"Iterations: {solver.stats['iterations']}")
+    print(f"Final columns in RMP: {len(columns)}")
+    print(f"Objective: {obj:.4f}")
+    print(f"Buses: {bus_sol:.2f}")
+
+    # Count positive theta variables
+    n_positive = sum(1 for v in col_sol if v > 1e-6) if col_sol else 0
+    print(f"Positive duties: {n_positive}")
+
+
+if __name__ == '__main__':
     main()
